@@ -45,6 +45,7 @@ function createTestConfig(overrides: Partial<TmuxConfig> = {}): TmuxConfig {
     enabled: true,
     layout: 'main-vertical',
     main_pane_size: 60,
+    auto_close: true,
     spawn_delay_ms: 300,
     max_retry_attempts: 2,
     layout_debounce_ms: 150,

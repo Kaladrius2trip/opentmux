@@ -276,7 +276,16 @@ export class TmuxSessionManager {
       reason,
     });
 
-    await closeTmuxPane(tracked.paneId);
+    if (!this.tmuxConfig.auto_close) {
+      log('[tmux-session-manager] auto_close disabled, leaving pane open', {
+        sessionId,
+        paneId: tracked.paneId,
+        reason,
+      });
+    } else {
+      await closeTmuxPane(tracked.paneId);
+    }
+
     this.sessions.delete(sessionId);
     
     log('[tmux-session-manager] session closed', { 
@@ -313,7 +322,7 @@ export class TmuxSessionManager {
       );
     }
 
-    if (this.sessions.size > 0) {
+    if (this.sessions.size > 0 && this.tmuxConfig.auto_close) {
       log('[tmux-session-manager] closing all panes', {
         count: this.sessions.size,
       });
@@ -326,6 +335,11 @@ export class TmuxSessionManager {
         ),
       );
       await Promise.all(closePromises);
+      this.sessions.clear();
+    } else if (this.sessions.size > 0) {
+      log('[tmux-session-manager] auto_close disabled, leaving panes open', {
+        count: this.sessions.size,
+      });
       this.sessions.clear();
     }
 

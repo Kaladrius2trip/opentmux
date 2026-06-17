@@ -52,6 +52,7 @@ function createTmuxConfig(overrides?: Partial<TmuxConfig>): TmuxConfig {
     enabled: true,
     layout: 'main-vertical',
     main_pane_size: 60,
+    auto_close: true,
     spawn_delay_ms: 0,
     max_retry_attempts: 2,
     layout_debounce_ms: 150,
@@ -256,6 +257,31 @@ test('TmuxSessionManager uses config spawn_delay_ms and max_retry_attempts', asy
   await promise;
 
   expect(spawnCalls.length).toBe(1);
+});
+
+test('TmuxSessionManager leaves pane open when auto_close is disabled', async () => {
+  const ctx = createMockPluginInput();
+  const config = createTmuxConfig({ auto_close: false });
+  const closeSpy = spyOn(utils, 'closeTmuxPane');
+  const manager = new TmuxSessionManager(ctx, config, 'http://localhost:4096');
+
+  const event = {
+    type: 'session.created',
+    properties: { info: { id: 'manual-close', parentID: 'parent', title: 'Manual Close' } },
+  };
+
+  const promise = manager.onSessionCreated(event);
+  await waitFor(() => spawnControllers.has('manual-close'));
+  spawnControllers.get('manual-close')?.resolve({ success: true, paneId: '%9' });
+  await promise;
+
+  (ctx.client.session.status as ReturnType<typeof mock>).mockResolvedValue({
+    data: { 'manual-close': { type: 'idle' } },
+  });
+
+  await waitFor(() => closeSpy.mock.calls.length > 0, 250).catch(() => undefined);
+
+  expect(closeSpy).not.toHaveBeenCalled();
 });
 
 test('TmuxSessionManager applies layout once after queue drains (deferred layout)', async () => {
