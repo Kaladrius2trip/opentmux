@@ -56,66 +56,45 @@ afterEach(() => {
   mock.restore();
 });
 
-test('closeTmuxPane kills attach process before closing pane', async () => {
+test('closeTmuxPane closes exact pane without killing child processes', async () => {
   // Setup mocks
   mockSpawnData.results.push(
     { exitCode: 0, stdout: '/usr/bin/tmux\n', stderr: '' }, // find tmux
     { exitCode: 0, stdout: 'tmux 3.3\n', stderr: '' }, // verify tmux
-    { exitCode: 0, stdout: '12345\n', stderr: '' }, // list-panes (get PID)
+    { exitCode: 0, stdout: '%1\t12345\topencode\n%2\t22222\tbash\n', stderr: '' },
     { exitCode: 0, stdout: '', stderr: '' }, // kill-pane
     { exitCode: 0, stdout: '', stderr: '' }, // layout
   );
 
-  spyOn(processUtils, 'getProcessChildren').mockReturnValue([9999]);
   const safeKillSpy = spyOn(processUtils, 'safeKill');
-  const waitSpy = spyOn(processUtils, 'waitForProcessExit');
 
   const result = await closeTmuxPane('%1');
 
   expect(result).toBe(true);
-  
-  // Verify PID flow
-  expect(processUtils.getProcessChildren).toHaveBeenCalledWith(12345); // Shell PID
-  expect(safeKillSpy).toHaveBeenCalledWith(9999, 'SIGTERM');
-  expect(waitSpy).toHaveBeenCalledWith(9999, 2000);
-  
+
+  expect(processUtils.getProcessChildren).not.toHaveBeenCalled();
+  expect(safeKillSpy).not.toHaveBeenCalled();
+
+  const listPanesCall = mockSpawnData.calls.find(c => c.command.includes('list-panes'));
+  expect(listPanesCall?.command).toEqual(['/usr/bin/tmux', 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{pane_current_command}']);
+
   // Verify tmux flow
   const killPaneCall = mockSpawnData.calls.find(c => c.command.includes('kill-pane'));
-  expect(killPaneCall).toBeDefined();
+  expect(killPaneCall?.command).toEqual(['/usr/bin/tmux', 'kill-pane', '-t', '%1']);
 });
 
-test('closeTmuxPane sends SIGKILL if SIGTERM fails', async () => {
+test('closeTmuxPane refuses to close when stored pane id is missing', async () => {
   mockSpawnData.results.push(
     { exitCode: 0, stdout: '/usr/bin/tmux\n', stderr: '' },
     { exitCode: 0, stdout: 'tmux 3.3\n', stderr: '' },
-    { exitCode: 0, stdout: '12345\n', stderr: '' }, // list-panes
-    { exitCode: 0, stdout: '', stderr: '' }, // kill-pane
-    { exitCode: 0, stdout: '', stderr: '' }, // layout
+    { exitCode: 0, stdout: '%2\t22222\tbash\n', stderr: '' },
   );
 
-  spyOn(processUtils, 'getProcessChildren').mockReturnValue([9999]);
-  spyOn(processUtils, 'waitForProcessExit').mockResolvedValue(false); // Timed out
   const safeKillSpy = spyOn(processUtils, 'safeKill');
 
-  await closeTmuxPane('%1');
+  const result = await closeTmuxPane('%1');
 
-  expect(safeKillSpy).toHaveBeenCalledWith(9999, 'SIGTERM');
-  expect(safeKillSpy).toHaveBeenCalledWith(9999, 'SIGKILL');
-});
-
-test('closeTmuxPane handles case where no attach process found', async () => {
-  mockSpawnData.results.push(
-    { exitCode: 0, stdout: '/usr/bin/tmux\n', stderr: '' },
-    { exitCode: 0, stdout: 'tmux 3.3\n', stderr: '' },
-    { exitCode: 0, stdout: '12345\n', stderr: '' }, // list-panes
-    { exitCode: 0, stdout: '', stderr: '' }, // kill-pane
-    { exitCode: 0, stdout: '', stderr: '' }, // layout
-  );
-
-  spyOn(processUtils, 'getProcessChildren').mockReturnValue([]); // No children
-  const safeKillSpy = spyOn(processUtils, 'safeKill');
-
-  await closeTmuxPane('%1');
-
+  expect(result).toBe(false);
   expect(safeKillSpy).not.toHaveBeenCalled();
+  expect(mockSpawnData.calls.some(c => c.command.includes('kill-pane'))).toBe(false);
 });

@@ -6,12 +6,6 @@ import {
   mainPanePercentForColumns,
 } from '../layout';
 import { log } from './logger';
-import { 
-  getProcessChildren, 
-  getProcessCommand, 
-  safeKill, 
-  waitForProcessExit 
-} from './process';
 
 const BASE_BACKOFF_MS = 250;
 
@@ -494,37 +488,36 @@ export async function closeTmuxPane(paneId: string): Promise<boolean> {
     return false;
   }
 
-  // PID-level termination
   try {
-    const pidResult = await spawnAsyncFn([tmux, 'list-panes', '-t', paneId, '-F', '#{pane_pid}']);
-    if (pidResult.exitCode === 0) {
-      const shellPid = parseInt(pidResult.stdout.trim(), 10);
-      if (Number.isFinite(shellPid)) {
-        log('[tmux] closeTmuxPane: found shell PID', { paneId, shellPid });
-        
-        const children = getProcessChildren(shellPid);
-        for (const childPid of children) {
-          const command = getProcessCommand(childPid);
-          if (command && command.includes('opencode')) {
-            log('[tmux] closeTmuxPane: killing child attach process', { childPid, command });
-            
-            safeKill(childPid, 'SIGTERM');
-            const exited = await waitForProcessExit(childPid, 2000);
-            
-            if (!exited) {
-              log('[tmux] closeTmuxPane: process did not exit, sending SIGKILL', { childPid });
-              safeKill(childPid, 'SIGKILL');
-            }
-          }
-        }
-      }
+    const paneResult = await spawnAsyncFn([
+      tmux,
+      'list-panes',
+      '-a',
+      '-F',
+      '#{pane_id}\t#{pane_pid}\t#{pane_current_command}',
+    ]);
+    if (paneResult.exitCode !== 0) {
+      log('[tmux] closeTmuxPane: could not list panes', {
+        paneId,
+        exitCode: paneResult.exitCode,
+        stderr: paneResult.stderr.trim(),
+      });
+      return false;
     }
-  } catch (err) {
-    log('[tmux] closeTmuxPane: error during PID termination', { error: String(err) });
-    // Continue to close pane anyway
-  }
 
-  try {
+    const paneLine = paneResult.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.split('\t')[0] === paneId);
+
+    if (!paneLine) {
+      log('[tmux] closeTmuxPane: exact pane id not found, refusing close', { paneId });
+      return false;
+    }
+
+    const [, panePid, paneCommand] = paneLine.split('\t');
+    log('[tmux] closeTmuxPane: exact pane found', { paneId, panePid, paneCommand });
+
     const result = await spawnAsyncFn([tmux, 'kill-pane', '-t', paneId]);
 
     log('[tmux] closeTmuxPane: result', {
