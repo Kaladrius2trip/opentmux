@@ -1,14 +1,10 @@
 import {
   findProcessIds,
   getProcessCommand,
-  isProcessAlive,
   safeKill,
   waitForProcessExit,
-  getListeningPids,
 } from './utils/process';
 import { log } from './utils/logger';
-
-const OPENCODE_PORT_START = 4096;
 
 export interface ReaperOptions {
   enabled: boolean;
@@ -59,19 +55,8 @@ export class ZombieReaper {
     } as ReaperOptions;
 
     log('[zombie-reaper] starting manual global reap');
-    const reaper = new ZombieReaper('', opts); // Dummy URL, we won't use instance scan
-    
-    // 1. Reap inactive servers first
-    // Default to 10 ports if not specified
-    const maxPorts = options.maxPorts || 10;
-    const endPort = OPENCODE_PORT_START + maxPorts;
-    
-    const reapedServers = await ZombieReaper.reapServers(OPENCODE_PORT_START, endPort);
-    if (reapedServers > 0) {
-      console.log(`Reaped ${reapedServers} inactive opencode servers.`);
-    }
+    const reaper = new ZombieReaper('', opts);
 
-    // 2. Reap zombie attach processes
     const processes = await reaper.findAllAttachProcesses();
 
     if (processes.length === 0) {
@@ -127,8 +112,6 @@ export class ZombieReaper {
           console.log(`🧟 Zombie detected: PID ${p.pid} (Session ${p.sessionId} on ${url})`);
           await reaper.forceKill(p.pid);
           reapedCount++;
-        } else {
-          // console.log(`✅ Active: PID ${p.pid} (Session ${p.sessionId})`);
         }
       }
     }
@@ -187,11 +170,10 @@ export class ZombieReaper {
         if (this.options.autoSelfDestruct && this.options.selfDestructTimeoutMs) {
           const idleTime = Date.now() - this.lastActivityTime;
           if (idleTime > this.options.selfDestructTimeoutMs) {
-            log('[zombie-reaper] Server abandoned (no clients). Self-destructing.', { 
+            log('[zombie-reaper] self-destruct disabled; keeping server alive', {
               idleTimeMs: idleTime,
-              timeoutMs: this.options.selfDestructTimeoutMs
+              timeoutMs: this.options.selfDestructTimeoutMs,
             });
-            process.exit(0);
           }
         }
       }
@@ -371,7 +353,13 @@ export class ZombieReaper {
          // We don't know the shape for sure, so fail-safe is better than assuming empty.
          // But if it IS an array of sessions, we should extract IDs.
          // Let's try to map 'id' or 'sessionId' if present.
-         const ids = data.map((item: any) => item?.id || item?.sessionId).filter(Boolean);
+          const ids = data
+            .map((item: unknown) => {
+              if (!item || typeof item !== 'object') return null;
+              const candidate = item as { id?: unknown; sessionId?: unknown };
+              return candidate.id ?? candidate.sessionId ?? null;
+            })
+            .filter((id): id is string => typeof id === 'string');
          if (ids.length > 0) return new Set(ids);
          
          // If array is empty, it means no sessions.
@@ -425,104 +413,4 @@ export class ZombieReaper {
     this.candidates.delete(proc.pid);
   }
 
-  static async reapServers(startPort: number, endPort: number): Promise<number> {
-    let reapedCount = 0;
-    console.log(`Scanning ports ${startPort}-${endPort} for inactive servers...`);
-
-    for (let port = startPort; port <= endPort; port++) {
-      const pids = getListeningPids(port);
-      if (pids.length === 0) continue;
-
-      for (const pid of pids) {
-        // Verify it's an opencode process (safety check via command name)
-        const cmd = getProcessCommand(pid) || '';
-        // We look for 'opencode' or 'node' (since it might be running via node)
-        // If it's some other random service, we shouldn't touch it.
-        const isSuspicious = cmd.includes('opencode') || cmd.includes('node') || cmd.includes('bun');
-        if (!isSuspicious) continue;
-
-        // Verify via HTTP
-        const url = `http://127.0.0.1:${port}`;
-        // Create a temporary reaper instance to use fetchActiveSessions
-        const reaper = new ZombieReaper(url, { 
-            enabled: true, intervalMs: 0, minZombieChecks: 0, gracePeriodMs: 0 
-        });
-        
-          try {
-            // Retry logic: try 3 times with delay
-            let sessions = null;
-            for (let i = 0; i < 3; i++) {
-                sessions = await reaper.fetchActiveSessions(url);
-                if (sessions !== null) break;
-                if (i < 2) await new Promise(r => setTimeout(r, 1000));
-            }
-            
-            // If sessions is null, it means fetch failed (unreachable/stuck)
-            if (sessions === null) {
-                console.log(`[zombie-reaper] Server on port ${port} (PID ${pid}) is unreachable/stuck after 3 retries. Killing...`);
-                try {
-                  safeKill(pid, 'SIGTERM');
-                  const exited = await waitForProcessExit(pid, 2000);
-                  if (!exited) {
-                    console.log(`[zombie-reaper] Force killing server on port ${port} (PID ${pid})...`);
-                    safeKill(pid, 'SIGKILL');
-                    await waitForProcessExit(pid, 1000);
-                    if (isProcessAlive(pid)) {
-                      console.error(`[zombie-reaper] CRITICAL: Failed to kill PID ${pid} on port ${port}`);
-                    }
-                  }
-                } catch (err) {
-                  console.error(`[zombie-reaper] Error killing PID ${pid}:`, err);
-                }
-                reapedCount++;
-                continue;
-            }
-
-            // If sessions exist and non-empty, protect servers with active sessions
-            if (sessions.size > 0) {
-                console.log(`[zombie-reaper] Skipping port ${port} (Has ${sessions.size} active session(s))`);
-                continue;
-            }
-
-            // If sessions is empty (reachable but no agents)
-            if (sessions.size === 0) {
-                console.log(`[zombie-reaper] Found inactive server on port ${port} (PID ${pid}). Killing...`);
-                try {
-                  safeKill(pid, 'SIGTERM');
-                  const exited = await waitForProcessExit(pid, 2000);
-                  if (!exited) {
-                    console.log(`[zombie-reaper] Force killing server on port ${port} (PID ${pid})...`);
-                    safeKill(pid, 'SIGKILL');
-                    await waitForProcessExit(pid, 1000);
-                    if (isProcessAlive(pid)) {
-                      console.error(`[zombie-reaper] CRITICAL: Failed to kill PID ${pid} on port ${port}`);
-                    }
-                  }
-                } catch (err) {
-                  console.error(`[zombie-reaper] Error killing PID ${pid}:`, err);
-                }
-                reapedCount++;
-            }
-        } catch (e) {
-            console.log(`[zombie-reaper] Server on port ${port} (PID ${pid}) error. Killing...`);
-            try {
-              safeKill(pid, 'SIGTERM');
-              const exited = await waitForProcessExit(pid, 2000);
-              if (!exited) {
-                console.log(`[zombie-reaper] Force killing server on port ${port} (PID ${pid})...`);
-                safeKill(pid, 'SIGKILL');
-                await waitForProcessExit(pid, 1000);
-                if (isProcessAlive(pid)) {
-                  console.error(`[zombie-reaper] CRITICAL: Failed to kill PID ${pid} on port ${port}`);
-                }
-              }
-            } catch (err) {
-              console.error(`[zombie-reaper] Error killing PID ${pid}:`, err);
-            }
-            reapedCount++;
-        }
-      }
-    }
-    return reapedCount;
-  }
 }
